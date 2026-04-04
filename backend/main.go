@@ -1,57 +1,97 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"fmt"
-	"log"
+"crypto/ed25519"
+"encoding/json"
+"fmt"
+"log"
+"net/http"
+"time"
 
-	"diasoft-auth/database"
-	"diasoft-auth/security"
-	"diasoft-auth/storage"
+"diasoft-auth/database"
+"diasoft-auth/security"
+"diasoft-auth/storage"
+
+"github.com/google/uuid"
 )
 
+type IssueRequest struct {
+RealName   string `json:"real_name"`
+DiplomaNum string `json:"diploma_num"`
+UnivID     string `json:"univ_id"`
+StudentID  string `json:"student_id"`
+Year       int    `json:"year"`
+}
+
 func main() {
-	// 1. Подключаемся к БД
-	db, err := database.Connect()
-	if err != nil {
-		log.Fatal("Ошибка подключения к БД:", err)
-	}
-	defer db.Close()
+db, err := database.Connect()
+if err != nil {
+log.Fatal("Ошибка подключения к БД:", err)
+}
+defer db.Close()
 
-	// 2. Генерируем ключи (в реальности берем из БД или Vault)
-	pub, privKey, _ := ed25519.GenerateKey(nil)
+pub, privKey, _ := ed25519.GenerateKey(nil)
+rdb := storage.ConnectRedis()
 
-	// 3. Данные студента
-	realName := "Сергей Игоревич"
-	realNum := "106104-777"
-	uID := "550e8400-e29b-41d4-a716-446655440000" // Тестовый UUID
+// АДМИНКА: Выпуск диплома
+http.HandleFunc("/admin/issue", func(w http.ResponseWriter, r *http.Request) {
+if r.Method != http.MethodPost {
+http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
+return
+}
 
-	// 4. Маскирование и хеширование
-	maskedName := security.MaskString(realName)
-	idHash := security.GenerateIdentityHash(realNum, uID)
+if r.Header.Get("X-Admin-Token") != "secret-diasoft-2026" {
+http.Error(w, "Доступ запрещен", http.StatusUnauthorized)
+return
+}
 
-	// 5. Формируем запись для вставки
-	entry := storage.DiplomaEntry{
-		UnivID:       uID,
-		StudentID:    "00000000-0000-0000-0000-000000000000", // Заглушка
-		StudentName:  maskedName,
-		DiplomaNum:   security.MaskDiploma(realNum),
-		IdentityHash: idHash,
-		Signature:    security.CreateDigitalSignature(idHash, privKey),
-		IssueYear:    2026,
-	}
+var req IssueRequest
+if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+http.Error(w, "Ошибка данных: "+err.Error(), http.StatusBadRequest)
+return
+}
 
-	// 6. Сохранение
-	err = storage.SaveDiploma(db, entry)
-	if err != nil {
-		log.Printf("Ошибка сохранения в БД: %v", err)
-	} else {
-		fmt.Println("✅ Запись успешно создана!")
-		fmt.Printf("Публичный ключ ВУЗа: %x\n", pub)
-		fmt.Printf("Поиск по хешу %s...\n", idHash[:10])
-		
-		// 7. Проверка поиска
-		exists, _ := storage.FindByIdentityHash(db, idHash)
-		fmt.Printf("Диплом найден в базе: %v\n", exists)
-	}
+maskedName := security.MaskString(req.RealName)
+idHash := security.GenerateIdentityHash(req.DiplomaNum, req.UnivID)
+
+entry := storage.DiplomaEntry{
+UnivID:       req.UnivID,
+StudentID:    req.StudentID,
+StudentName:  maskedName,
+DiplomaNum:   security.MaskDiploma(req.DiplomaNum),
+IdentityHash: idHash,
+Signature:    security.CreateDigitalSignature(idHash, privKey),
+IssueYear:    req.Year,
+}
+
+if err := storage.SaveDiploma(db, entry); err != nil {
+http.Error(w, "Ошибка БД: "+err.Error(), http.StatusInternalServerError)
+return
+}
+
+token := uuid.New().String()
+_ = storage.CreatePublicToken(rdb, token, idHash, 24*time.Hour)
+
+w.Header().Set("Content-Type", "application/json")
+fmt.Fprintf(w, `{"status":"created", "verify_url":"http://217.60.237.170:8080/verify/%s"}`, token)
+log.Printf("Админ выпустил диплом для: %s", req.RealName)
+})
+
+// ПРОВЕРКА: Публичный доступ
+http.HandleFunc("/verify/", func(w http.ResponseWriter, r *http.Request) {
+token := r.URL.Path[len("/verify/"):]
+idHash, err := storage.GetHashByToken(rdb, token)
+if err != nil {
+http.Error(w, "Ссылка протухла или неверная", http.StatusNotFound)
+return
+}
+
+exists, _ := storage.FindByIdentityHash(db, idHash)
+
+w.Header().Set("Content-Type", "application/json")
+fmt.Fprintf(w, `{"valid": %v, "identity_hash": "%s", "issuer_pub_key": "%x"}`, exists, idHash, pub)
+})
+
+fmt.Println("🚀 Diasoft Admin API запущен на http://217.60.237.170:8080")
+log.Fatal(http.ListenAndServe(":8080", nil))
 }

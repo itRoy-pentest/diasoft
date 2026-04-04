@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # Бэкенд
+  api:
+    build: ./backend
+    container_name: diasoft_backend
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_HOST=db
+      - REDIS_HOST=redis:6379
+    depends_on:
+      - db
+      - redis
+
+  # База данных
+  db:
+    image: postgres:14-alpine
+    container_name: diasoft_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "Rid@123SQL#"
+      POSTGRES_DB: diploma_platform
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Редис
+  redis:
+    image: redis:alpine
+    container_name: diasoft_redis
+    restart: always
+
+  # ФРОНТЕНД (Раскомментируй, когда пришлют)
+  # frontend:
+  #   build: ./frontend
+  #   ports:
+  #     - "80:80"
+  #   depends_on:
+  #     - api
+
+volumes:
+  pgdata:
